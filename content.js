@@ -352,7 +352,7 @@
       background: rgba(255, 255, 255, 0.3);
     }
 
-    /* Friend Code Card */
+    /* Friend Code Card with username display */
     .code-card {
       display: flex;
       align-items: center;
@@ -362,6 +362,7 @@
       border-radius: 12px;
       padding: 10px 14px;
       transition: all 0.2s;
+      cursor: help;
     }
 
     .code-card:hover {
@@ -382,6 +383,12 @@
       font-weight: 700;
       letter-spacing: 0.5px;
       color: #f1f5f9;
+    }
+
+    .code-user {
+      font-size: 12px;
+      color: #60a5fa;
+      font-weight: 500;
     }
 
     .copy-btn {
@@ -487,7 +494,7 @@
       <!-- Main List screen -->
       <div class="list-screen" id="listScreen">
         <div class="list-toolbar">
-          <input type="text" class="search-input" id="searchInput" placeholder="Filter codes...">
+          <input type="text" class="search-input" id="searchInput" placeholder="Filter by code or username...">
           <button class="copy-all-btn" id="copyAllBtn">Copy All</button>
         </div>
         <div class="stats-bar">
@@ -527,7 +534,10 @@
   chrome.storage.local.get({ friendCodes: [] }, (result) => {
     friendCodes = result.friendCodes || [];
     renderCodes();
-    updateGitHubStatusLabel("Pending", "Sync pending. Click the badge or sync buttons to trigger.");
+    updateGitHubStatusLabel(
+      "Pending",
+      "Sync pending. Click the badge or sync buttons to trigger.",
+    );
   });
 
   // Toggle Minimized/Maximized
@@ -578,28 +588,31 @@
     }
   });
 
-  // Copy All button
+  // Copy All button (Copies newline-separated raw codes)
   copyAllBtn.addEventListener("click", () => {
     const filtered = getFilteredCodes();
     if (filtered.length === 0) return;
 
-    const textToCopy = filtered.join("\n");
-    navigator.clipboard.writeText(textToCopy).then(() => {
-      const oldText = copyAllBtn.textContent;
-      copyAllBtn.textContent = "Copied All!";
-      copyAllBtn.style.background = "rgba(34, 197, 94, 0.2)";
-      copyAllBtn.style.color = "#4ade80";
-      copyAllBtn.style.borderColor = "rgba(34, 197, 94, 0.4)";
+    const textToCopy = filtered.map((entry) => entry.f_code).join("\n");
+    navigator.clipboard
+      .writeText(textToCopy)
+      .then(() => {
+        const oldText = copyAllBtn.textContent;
+        copyAllBtn.textContent = "Copied All!";
+        copyAllBtn.style.background = "rgba(34, 197, 94, 0.2)";
+        copyAllBtn.style.color = "#4ade80";
+        copyAllBtn.style.borderColor = "rgba(34, 197, 94, 0.4)";
 
-      setTimeout(() => {
-        copyAllBtn.textContent = oldText;
-        copyAllBtn.style.background = "";
-        copyAllBtn.style.color = "";
-        copyAllBtn.style.borderColor = "";
-      }, 2000);
-    }).catch(err => {
-      console.error("Clipboard copy failed:", err);
-    });
+        setTimeout(() => {
+          copyAllBtn.textContent = oldText;
+          copyAllBtn.style.background = "";
+          copyAllBtn.style.color = "";
+          copyAllBtn.style.borderColor = "";
+        }, 2000);
+      })
+      .catch((err) => {
+        console.error("Clipboard copy failed:", err);
+      });
   });
 
   // Filter typing event listener
@@ -643,7 +656,8 @@
     showLoading(true);
     updateGitHubStatusLabel("Syncing", "Syncing with GitHub...");
 
-    const fetchUrl = "https://www.reddit.com/r/PokemonGoFriends/comments/1rz0wer/friendship_exp_gift_exchange_megathread.json?limit=500";
+    const fetchUrl =
+      "https://www.reddit.com/r/PokemonGoFriends/comments/1rz0wer/friendship_exp_gift_exchange_megathread.json?limit=500";
 
     fetch(fetchUrl)
       .then((res) => {
@@ -651,16 +665,21 @@
         return res.json();
       })
       .then((data) => {
-        const foundCodes = new Set();
+        const tempEntries = [];
         const codeRegex = /\b\d{4}[\s-]*\d{4}[\s-]*\d{4}\b/g;
 
-        function scanText(text) {
-          if (!text) return;
+        function scanComment(author, body) {
+          if (!body) return;
+          const cleanAuthor = author || "deleted";
           let match;
-          while ((match = codeRegex.exec(text)) !== null) {
-            const clean = match[0].replace(/\D/g, "");
-            if (clean.length === 12) {
-              foundCodes.add(clean);
+          while ((match = codeRegex.exec(body)) !== null) {
+            const cleanCode = match[0].replace(/\D/g, "");
+            if (cleanCode.length === 12) {
+              tempEntries.push({
+                username: cleanAuthor,
+                f_code: cleanCode,
+                message: body,
+              });
             }
           }
         }
@@ -669,7 +688,7 @@
           if (!commentsList || !Array.isArray(commentsList)) return;
           for (const item of commentsList) {
             if (item.kind === "t1" && item.data) {
-              scanText(item.data.body);
+              scanComment(item.data.author, item.data.body);
               if (item.data.replies && item.data.replies.data) {
                 scanComments(item.data.replies.data.children);
               }
@@ -681,13 +700,21 @@
           scanComments(data[1].data.children);
         }
 
-        const newCodes = Array.from(foundCodes);
-
         // Merge with existing codes in local storage
         chrome.storage.local.get({ friendCodes: [] }, (result) => {
           const existing = result.friendCodes || [];
-          const combined = Array.from(new Set([...existing, ...newCodes]));
-          
+
+          // Deduplicate on "f_code"
+          const uniqueMap = new Map();
+          existing.forEach((entry) => {
+            if (entry && entry.f_code) uniqueMap.set(entry.f_code, entry);
+          });
+          tempEntries.forEach((entry) => {
+            if (entry && entry.f_code) uniqueMap.set(entry.f_code, entry);
+          });
+
+          const combined = Array.from(uniqueMap.values());
+
           chrome.storage.local.set({ friendCodes: combined }, () => {
             friendCodes = combined;
             hasFetchedThisSession = true;
@@ -702,48 +729,73 @@
       .catch((error) => {
         console.error("Failed to fetch PokeFriends codes:", error);
         showLoading(false);
-        updateGitHubStatusLabel("Error", "Reddit scan failed: " + error.message);
+        updateGitHubStatusLabel(
+          "Error",
+          "Reddit scan failed: " + error.message,
+        );
       });
   }
 
   // Securely trigger GitHub sync via the background page
   function triggerGitHubSync(codes, force = false) {
-    updateGitHubStatusLabel("Syncing", "Contacting background service worker...");
+    updateGitHubStatusLabel(
+      "Syncing",
+      "Contacting background service worker...",
+    );
 
-    chrome.runtime.sendMessage({
-      action: "sync_github",
-      codes: codes,
-      force: force
-    }, (response) => {
-      // Handle response from background script
-      if (chrome.runtime.lastError) {
-        console.error("Extension runtime error during GitHub sync:", chrome.runtime.lastError);
-        updateGitHubStatusLabel("Error", "Could not connect to background extension worker: " + chrome.runtime.lastError.message);
-        return;
-      }
-
-      if (!response) {
-        updateGitHubStatusLabel("Error", "No response received from background extension sync worker.");
-        return;
-      }
-
-      if (response.success) {
-        updateGitHubStatusLabel("Success", `Sync completed. Repo has ${response.count} codes total.`);
-      } else {
-        if (response.skipped) {
-          updateGitHubStatusLabel("Cooldown", response.error);
-        } else {
-          updateGitHubStatusLabel("Error", response.error);
+    chrome.runtime.sendMessage(
+      {
+        action: "sync_github",
+        codes: codes,
+        force: force,
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          console.error(
+            "Extension runtime error during GitHub sync:",
+            chrome.runtime.lastError,
+          );
+          updateGitHubStatusLabel(
+            "Error",
+            "Could not connect to background extension worker: " +
+              chrome.runtime.lastError.message,
+          );
+          return;
         }
-      }
-    });
+
+        if (!response) {
+          updateGitHubStatusLabel(
+            "Error",
+            "No response received from background extension sync worker.",
+          );
+          return;
+        }
+
+        if (response.success) {
+          updateGitHubStatusLabel(
+            "Success",
+            `Sync completed. Repo has ${response.count} codes total.`,
+          );
+        } else {
+          if (response.skipped) {
+            updateGitHubStatusLabel("Cooldown", response.error);
+          } else {
+            updateGitHubStatusLabel("Error", response.error);
+          }
+        }
+      },
+    );
   }
 
   // Get current list of codes filtered by the search query
   function getFilteredCodes() {
     const query = searchInput.value.trim().toLowerCase();
     if (!query) return friendCodes;
-    return friendCodes.filter(code => code.includes(query));
+    return friendCodes.filter(
+      (entry) =>
+        (entry.f_code && entry.f_code.includes(query)) ||
+        (entry.username && entry.username.toLowerCase().includes(query)),
+    );
   }
 
   // Formats code as 'XXXX XXXX XXXX' for UI
@@ -770,17 +822,24 @@
       return;
     }
 
-    filtered.forEach((code) => {
+    filtered.forEach((entry) => {
       const card = document.createElement("div");
       card.className = "code-card";
+      card.title = entry.message || "No original message snippet available.";
 
       const info = document.createElement("div");
       info.className = "code-info";
 
       const val = document.createElement("span");
       val.className = "code-value";
-      val.textContent = formatCode(code);
+      val.textContent = formatCode(entry.f_code);
+
+      const user = document.createElement("span");
+      user.className = "code-user";
+      user.textContent = `u/${entry.username}`;
+
       info.appendChild(val);
+      info.appendChild(user);
       card.appendChild(info);
 
       const copyBtn = document.createElement("button");
@@ -790,8 +849,9 @@
         Copy
       `;
 
-      copyBtn.addEventListener("click", () => {
-        navigator.clipboard.writeText(code).then(() => {
+      copyBtn.addEventListener("click", (e) => {
+        e.stopPropagation(); // Avoid tooltip trigger
+        navigator.clipboard.writeText(entry.f_code).then(() => {
           copyBtn.classList.add("copied");
           copyBtn.innerHTML = `
             <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>

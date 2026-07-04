@@ -20,7 +20,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function handleGitHubSync(newCodes, force, sendResponse) {
+async function handleGitHubSync(newEntries, force, sendResponse) {
   try {
     // 1. Fetch the env.json configuration file securely
     const configUrl = chrome.runtime.getURL("env.json");
@@ -36,14 +36,18 @@ async function handleGitHubSync(newCodes, force, sendResponse) {
     // Validate placeholders
     if (
       !env.GITHUB_TOKEN ||
+      env.GITHUB_TOKEN.startsWith("YOUR_") ||
       !env.REPO_OWNER ||
+      env.REPO_OWNER.startsWith("YOUR_") ||
       !env.REPO_NAME ||
-      !env.FILE_PATH
+      env.REPO_NAME.startsWith("YOUR_") ||
+      !env.FILE_PATH ||
+      env.FILE_PATH.startsWith("YOUR_")
     ) {
       return sendResponse({
         success: false,
         error:
-          "GitHub configurations in env.json are still set to null values. Please update env.json.",
+          "GitHub configurations in env.json are still set to placeholder values. Please edit env.json on your PC first.",
       });
     }
 
@@ -75,15 +79,25 @@ async function handleGitHubSync(newCodes, force, sendResponse) {
     };
 
     let sha = null;
-    let existingContent = "";
+    let existingData = null;
 
     // A. Read the current file to get the SHA and current codes
     const getRes = await fetch(url, { headers });
     if (getRes.ok) {
       const fileData = await getRes.json();
       sha = fileData.sha;
-      // Decode content from base64 (remove potential whitespaces/newlines)
-      existingContent = atob(fileData.content.replace(/\s/g, ""));
+      // Decode content from base64 (remove potential whitespaces)
+      const existingContent = atob(fileData.content.replace(/\s/g, ""));
+      if (existingContent.trim()) {
+        try {
+          existingData = JSON.parse(existingContent);
+        } catch (e) {
+          console.warn(
+            "Failed to parse existing JSON on GitHub, overwriting instead:",
+            e,
+          );
+        }
+      }
     } else if (getRes.status !== 404) {
       return sendResponse({
         success: false,
@@ -91,40 +105,47 @@ async function handleGitHubSync(newCodes, force, sendResponse) {
       });
     }
 
-    // B. Merge existing codes with new codes
-    let mergedCodes = [...newCodes];
-    if (existingContent) {
-      try {
-        let existingCodes = [];
-        if (existingContent.trim().startsWith("[")) {
-          existingCodes = JSON.parse(existingContent);
-        } else {
-          // Fallback to line-separated codes
-          existingCodes = existingContent
-            .split(/\r?\n/)
-            .map((c) => c.trim())
-            .filter(Boolean);
-        }
-        if (Array.isArray(existingCodes)) {
-          // Merge & De-duplicate
-          mergedCodes = Array.from(new Set([...existingCodes, ...newCodes]));
-        }
-      } catch (err) {
-        console.warn(
-          "Failed to parse existing content in repo, overwriting instead:",
-          err,
-        );
+    // Extract raw array of entries from existing file based on wrapper
+    let existingArray = [];
+    if (existingData) {
+      if (Array.isArray(existingData.data)) {
+        existingArray = existingData.data;
+      } else if (Array.isArray(existingData)) {
+        existingArray = existingData;
       }
     }
 
-    // C. Format and Encode updated content
-    // Format as a simple list of codes (one per line)
-    const formattedContent = mergedCodes.join("\n");
+    // B. Merge existing entries with new entries, deduplicating on "f_code"
+    const uniqueMap = new Map();
+    // Add existing first
+    existingArray.forEach((entry) => {
+      if (entry && entry.f_code) {
+        uniqueMap.set(entry.f_code, entry);
+      }
+    });
+    // Add new (overwrites/updates existing metadata if conflict)
+    newEntries.forEach((entry) => {
+      if (entry && entry.f_code) {
+        uniqueMap.set(entry.f_code, entry);
+      }
+    });
+
+    const mergedArray = Array.from(uniqueMap.values());
+
+    // C. Wrap the array in the required JSON envelope
+    const timestampStr = new Date(now).toISOString();
+    const wrappedResult = {
+      last_updated_at: timestampStr,
+      data: mergedArray,
+    };
+
+    // D. Encode updated content
+    const formattedContent = JSON.stringify(wrappedResult, null, 2);
     const base64Content = btoa(unescape(encodeURIComponent(formattedContent)));
 
-    // D. PUT request to upload the file to GitHub
+    // E. PUT request to upload the file to GitHub
     const commitBody = {
-      message: "Sync Pokemon Go Friend Codes (via PokeFriends)",
+      message: `Sync Pokemon Go Friend Codes (Total: ${mergedArray.length})`,
       content: base64Content,
     };
     if (sha) {
@@ -149,7 +170,7 @@ async function handleGitHubSync(newCodes, force, sendResponse) {
 
     sendResponse({
       success: true,
-      count: mergedCodes.length,
+      count: mergedArray.length,
       timestamp: now,
     });
   } catch (err) {
