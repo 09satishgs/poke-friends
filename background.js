@@ -1,5 +1,4 @@
-const TARGET_URL =
-  "https://www.reddit.com/r/PokemonGoFriends/comments/1rz0wer/friendship_exp_gift_exchange_megathread/";
+const TARGET_URL = "https://www.reddit.com/r/PokemonGoFriends/comments/1rz0wer/friendship_exp_gift_exchange_megathread/";
 
 // Redirect user or toggle UI on extension icon clicks
 chrome.action.onClicked.addListener((tab) => {
@@ -26,28 +25,21 @@ async function handleGitHubSync(newEntries, force, sendResponse) {
     const configUrl = chrome.runtime.getURL("env.json");
     const configRes = await fetch(configUrl);
     if (!configRes.ok) {
-      return sendResponse({
-        success: false,
-        error: "Failed to load env.json configuration file.",
-      });
+      return sendResponse({ success: false, error: "Failed to load env.json configuration file." });
     }
     const env = await configRes.json();
 
     // Validate placeholders
     if (
-      !env.GITHUB_TOKEN ||
-      env.GITHUB_TOKEN.startsWith("YOUR_") ||
-      !env.REPO_OWNER ||
-      env.REPO_OWNER.startsWith("YOUR_") ||
-      !env.REPO_NAME ||
-      env.REPO_NAME.startsWith("YOUR_") ||
-      !env.FILE_PATH ||
-      env.FILE_PATH.startsWith("YOUR_")
+      !env.GITHUB_TOKEN || env.GITHUB_TOKEN.startsWith("YOUR_") ||
+      !env.REPO_OWNER || env.REPO_OWNER.startsWith("YOUR_") ||
+      !env.REPO_NAME || env.REPO_NAME.startsWith("YOUR_") ||
+      !env.FILE_PATH || env.FILE_PATH.startsWith("YOUR_") ||
+      !env.ARCHIVES_PATH || env.ARCHIVES_PATH.startsWith("YOUR_")
     ) {
       return sendResponse({
         success: false,
-        error:
-          "GitHub configurations in env.json are still set to placeholder values. Please edit env.json on your PC first.",
+        error: "GitHub configurations in env.json are still set to placeholder values. Please edit env.json on your PC first."
       });
     }
 
@@ -57,55 +49,95 @@ async function handleGitHubSync(newEntries, force, sendResponse) {
     const now = Date.now();
     const cooldownPeriod = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
 
-    if (!force && lastUpdate && now - lastUpdate < cooldownPeriod) {
+    if (!force && lastUpdate && (now - lastUpdate < cooldownPeriod)) {
       const remainingTime = cooldownPeriod - (now - lastUpdate);
       const hours = Math.floor(remainingTime / (1000 * 60 * 60));
-      const minutes = Math.floor(
-        (remainingTime % (1000 * 60 * 60)) / (1000 * 60),
-      );
+      const minutes = Math.floor((remainingTime % (1000 * 60 * 60)) / (1000 * 60));
       return sendResponse({
         success: false,
         skipped: true,
-        error: `Skipped: GitHub sync is rate-limited to once every 24 hours. (Lock ends in ${hours}h ${minutes}m)`,
+        error: `Skipped: GitHub sync is rate-limited to once every 24 hours. (Lock ends in ${hours}h ${minutes}m)`
       });
     }
 
-    // 3. GitHub API calls
-    const url = `https://api.github.com/repos/${env.REPO_OWNER}/${env.REPO_NAME}/contents/${env.FILE_PATH}`;
+    // 3. GitHub API Setup
     const headers = {
-      Authorization: `token ${env.GITHUB_TOKEN}`,
-      Accept: "application/vnd.github.v3+json",
-      "Content-Type": "application/json",
+      "Authorization": `token ${env.GITHUB_TOKEN}`,
+      "Accept": "application/vnd.github.v3+json",
+      "Content-Type": "application/json"
     };
 
+    const mainFileUrl = `https://api.github.com/repos/${env.REPO_OWNER}/${env.REPO_NAME}/contents/${env.FILE_PATH}`;
     let sha = null;
+    let existingRawContent = "";
     let existingData = null;
 
-    // A. Read the current file to get the SHA and current codes
-    const getRes = await fetch(url, { headers });
+    // A. Read the current file from FILE_PATH to get the SHA and current content
+    const getRes = await fetch(mainFileUrl, { headers });
     if (getRes.ok) {
       const fileData = await getRes.json();
       sha = fileData.sha;
-      // Decode content from base64 (remove potential whitespaces)
-      const existingContent = atob(fileData.content.replace(/\s/g, ""));
-      if (existingContent.trim()) {
+      // Decode content from base64 (remove potential whitespaces/newlines)
+      existingRawContent = atob(fileData.content.replace(/\s/g, ""));
+      if (existingRawContent.trim()) {
         try {
-          existingData = JSON.parse(existingContent);
+          existingData = JSON.parse(existingRawContent);
         } catch (e) {
-          console.warn(
-            "Failed to parse existing JSON on GitHub, overwriting instead:",
-            e,
-          );
+          console.warn("Failed to parse existing JSON on GitHub:", e);
         }
       }
     } else if (getRes.status !== 404) {
       return sendResponse({
         success: false,
-        error: `GitHub GET failed (Status ${getRes.status}): ${getRes.statusText}`,
+        error: `GitHub GET main file failed (Status ${getRes.status}): ${getRes.statusText}`
       });
     }
 
-    // Extract raw array of entries from existing file based on wrapper
+    // B. Handle Archiving of existing file if it contains last_updated_at
+    if (existingData && existingData.last_updated_at) {
+      try {
+        const lastUpdatedAt = existingData.last_updated_at;
+        // Extract UTC Date (YYYY-MM-DD) from ISO String
+        const utcDate = lastUpdatedAt.split("T")[0];
+        
+        if (utcDate && utcDate.length === 10) {
+          const cleanArchivesFolder = env.ARCHIVES_PATH.replace(/^\/+|\/+$/g, "");
+          const archiveFileUrl = `https://api.github.com/repos/${env.REPO_OWNER}/${env.REPO_NAME}/contents/${cleanArchivesFolder}/${utcDate}.json`;
+
+          // Check if archive for this date already exists
+          const checkArchiveRes = await fetch(archiveFileUrl, { headers });
+          if (checkArchiveRes.status === 404) {
+            // Archive does not exist yet; proceed with PUT
+            const base64ArchiveContent = btoa(unescape(encodeURIComponent(existingRawContent)));
+            const archiveBody = {
+              message: `Archive friend codes for ${utcDate}`,
+              content: base64ArchiveContent
+            };
+
+            const putArchiveRes = await fetch(archiveFileUrl, {
+              method: "PUT",
+              headers,
+              body: JSON.stringify(archiveBody)
+            });
+
+            if (putArchiveRes.ok) {
+              console.log(`Archived previous snapshot to: ${cleanArchivesFolder}/${utcDate}.json`);
+            } else {
+              console.warn(`Failed to write archive (Status ${putArchiveRes.status}): ${putArchiveRes.statusText}`);
+            }
+          } else if (checkArchiveRes.ok) {
+            console.log(`Archive file for date ${utcDate} already exists. Silently skipped archive write.`);
+          } else {
+            console.warn(`Failed to verify archive status (Status ${checkArchiveRes.status}). Proceeding without archive.`);
+          }
+        }
+      } catch (archiveErr) {
+        // Silently capture archive error so we don't break main sync
+        console.error("Error during archiving operation:", archiveErr);
+      }
+    }
+
+    // C. Extract raw array of entries from existing file based on wrapper
     let existingArray = [];
     if (existingData) {
       if (Array.isArray(existingData.data)) {
@@ -115,16 +147,16 @@ async function handleGitHubSync(newEntries, force, sendResponse) {
       }
     }
 
-    // B. Merge existing entries with new entries, deduplicating on "f_code"
+    // D. Merge existing entries with new entries, deduplicating on "f_code"
     const uniqueMap = new Map();
     // Add existing first
-    existingArray.forEach((entry) => {
+    existingArray.forEach(entry => {
       if (entry && entry.f_code) {
         uniqueMap.set(entry.f_code, entry);
       }
     });
     // Add new (overwrites/updates existing metadata if conflict)
-    newEntries.forEach((entry) => {
+    newEntries.forEach(entry => {
       if (entry && entry.f_code) {
         uniqueMap.set(entry.f_code, entry);
       }
@@ -132,36 +164,36 @@ async function handleGitHubSync(newEntries, force, sendResponse) {
 
     const mergedArray = Array.from(uniqueMap.values());
 
-    // C. Wrap the array in the required JSON envelope
+    // E. Wrap the array in the required JSON envelope
     const timestampStr = new Date(now).toISOString();
     const wrappedResult = {
       last_updated_at: timestampStr,
-      data: mergedArray,
+      data: mergedArray
     };
 
-    // D. Encode updated content
+    // F. Encode updated content
     const formattedContent = JSON.stringify(wrappedResult, null, 2);
     const base64Content = btoa(unescape(encodeURIComponent(formattedContent)));
 
-    // E. PUT request to upload the file to GitHub
+    // G. PUT request to upload the file to GitHub (FILE_PATH)
     const commitBody = {
       message: `Sync Pokemon Go Friend Codes (Total: ${mergedArray.length})`,
-      content: base64Content,
+      content: base64Content
     };
     if (sha) {
       commitBody.sha = sha;
     }
 
-    const putRes = await fetch(url, {
+    const putRes = await fetch(mainFileUrl, {
       method: "PUT",
       headers,
-      body: JSON.stringify(commitBody),
+      body: JSON.stringify(commitBody)
     });
 
     if (!putRes.ok) {
       return sendResponse({
         success: false,
-        error: `GitHub PUT failed (Status ${putRes.status}): ${putRes.statusText}`,
+        error: `GitHub PUT failed (Status ${putRes.status}): ${putRes.statusText}`
       });
     }
 
@@ -171,8 +203,9 @@ async function handleGitHubSync(newEntries, force, sendResponse) {
     sendResponse({
       success: true,
       count: mergedArray.length,
-      timestamp: now,
+      timestamp: now
     });
+
   } catch (err) {
     console.error("Error during GitHub sync operation:", err);
     sendResponse({ success: false, error: err.message });
