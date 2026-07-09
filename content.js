@@ -65,6 +65,16 @@
       transform: scale(1.08) rotate(15deg);
     }
 
+    @keyframes pulse-ring {
+      0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+      70% { box-shadow: 0 0 0 12px rgba(59, 130, 246, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+    }
+
+    .pokefriends-panel.minimized.syncing {
+      animation: pulse-ring 1.5s cubic-bezier(0.215, 0.610, 0.355, 1) infinite;
+    }
+
     .pokefriends-panel.minimized .panel-full-content {
       display: none;
     }
@@ -530,21 +540,34 @@
   let friendCodes = [];
   let hasFetchedThisSession = false;
 
-  // Initialize: Load cached codes from local storage
-  chrome.storage.local.get({ friendCodes: [] }, (result) => {
+  // Initialize: Load cached codes from local storage and check for auto-sync
+  chrome.storage.local.get({ friendCodes: [], lastGithubUpdate: 0 }, (result) => {
     friendCodes = result.friendCodes || [];
     renderCodes();
-    updateGitHubStatusLabel(
-      "Pending",
-      "Sync pending. Click the badge or sync buttons to trigger.",
-    );
+
+    const lastUpdate = result.lastGithubUpdate || 0;
+    const now = Date.now();
+    const cooldownPeriod = 24 * 60 * 60 * 1000; // 24 hours
+
+    if (now - lastUpdate >= cooldownPeriod) {
+      console.log("Last sync was over 24h ago. Automatically syncing in background...");
+      startFetchAndProcess(false, true); // (force = false, runInBackground = true)
+    } else {
+      const remainingTime = cooldownPeriod - (now - lastUpdate);
+      const hours = Math.floor(remainingTime / (1000 * 60 * 60));
+      const minutes = Math.floor((remainingTime % (1000 * 60 * 60)) / (1000 * 60));
+      updateGitHubStatusLabel(
+        "Cooldown",
+        `Skipped auto-sync: within 24h cooldown. (Lock ends in ${hours}h ${minutes}m)`
+      );
+    }
   });
 
   // Toggle Minimized/Maximized
   minimizedBadge.addEventListener("click", () => {
     panel.classList.remove("minimized");
     if (!hasFetchedThisSession) {
-      startFetchAndProcess(false); // Run automatic fetch and sync on first click
+      startFetchAndProcess(false, false); // Run manual fetch and sync on click
     }
   });
 
@@ -652,8 +675,12 @@
   }
 
   // Fetch comments and scan for friend codes
-  function startFetchAndProcess(forceGithub = false) {
-    showLoading(true);
+  function startFetchAndProcess(forceGithub = false, runInBackground = false) {
+    if (!runInBackground) {
+      showLoading(true);
+    } else {
+      panel.classList.add("syncing");
+    }
     updateGitHubStatusLabel("Syncing", "Syncing with GitHub...");
 
     const fetchUrl =
@@ -667,6 +694,9 @@
       .then((data) => {
         const tempEntries = [];
         const codeRegex = /\b\d{4}[\s-]*\d{4}[\s-]*\d{4}\b/g;
+
+        // Reset regex state
+        codeRegex.lastIndex = 0;
 
         function scanComment(author, body) {
           if (!body) return;
@@ -719,7 +749,12 @@
             friendCodes = combined;
             hasFetchedThisSession = true;
             renderCodes();
-            showLoading(false);
+            
+            if (!runInBackground) {
+              showLoading(false);
+            } else {
+              panel.classList.remove("syncing");
+            }
 
             // Trigger secure background synchronization to GitHub
             triggerGitHubSync(combined, forceGithub);
@@ -728,7 +763,11 @@
       })
       .catch((error) => {
         console.error("Failed to fetch PokeFriends codes:", error);
-        showLoading(false);
+        if (!runInBackground) {
+          showLoading(false);
+        } else {
+          panel.classList.remove("syncing");
+        }
         updateGitHubStatusLabel(
           "Error",
           "Reddit scan failed: " + error.message,

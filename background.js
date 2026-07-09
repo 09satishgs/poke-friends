@@ -107,7 +107,7 @@ async function handleGitHubSync(newEntries, force, sendResponse) {
       });
     }
 
-    // B. Read list of existing archive files in ARCHIVES_PATH to collect their SHAs
+    // B. Read list of existing archive files in ARCHIVES_PATH to collect their SHAs (exclude archives-list.json)
     const archivesListUrl = `https://api.github.com/repos/${env.REPO_OWNER}/${env.REPO_NAME}/contents/${cleanArchivesFolder}?ref=${branch}`;
     const existingArchives = [];
 
@@ -116,7 +116,7 @@ async function handleGitHubSync(newEntries, force, sendResponse) {
       const filesList = await archivesRes.json();
       if (Array.isArray(filesList)) {
         filesList.forEach((file) => {
-          if (file.type === "file") {
+          if (file.type === "file" && file.name !== "archives-list.json") {
             existingArchives.push(file);
           }
         });
@@ -181,7 +181,23 @@ async function handleGitHubSync(newEntries, force, sendResponse) {
     };
     const formattedMainContent = JSON.stringify(wrappedResult, null, 2);
 
-    // F. Construct Tree Items
+    // F. Compile list of archive filenames for archives-list.json
+    const archiveFileNames = existingArchives.map(file => file.name);
+    if (archiveCreated && archiveItem) {
+      const parts = archiveItem.path.split('/');
+      const newArchiveName = parts[parts.length - 1];
+      if (!archiveFileNames.includes(newArchiveName)) {
+        archiveFileNames.push(newArchiveName);
+      }
+    }
+
+    // Sort descending (newest date first)
+    archiveFileNames.sort((a, b) => b.localeCompare(a));
+
+    const archivesListContent = archiveFileNames.map(name => ({ fileName: name }));
+    const formattedArchivesList = JSON.stringify(archivesListContent, null, 2);
+
+    // G. Construct Tree Items
     const treeItems = [];
 
     // 1. Add all existing archive files using their existing SHAs
@@ -199,7 +215,15 @@ async function handleGitHubSync(newEntries, force, sendResponse) {
       treeItems.push(archiveItem);
     }
 
-    // 3. Add the overwritten main file
+    // 3. Add the archives-list.json file
+    treeItems.push({
+      path: `${cleanArchivesFolder}/archives-list.json`,
+      mode: "100644",
+      type: "blob",
+      content: formattedArchivesList
+    });
+
+    // 4. Add the overwritten main file
     treeItems.push({
       path: env.FILE_PATH,
       mode: "100644",
